@@ -38,6 +38,8 @@ done
 
 echo "Preparing the build environment..."
 
+SECONDS=0
+
 pushd $(dirname "$0") > /dev/null
 CORES=`cat /proc/cpuinfo | grep -c processor`
 
@@ -322,5 +324,8 @@ build_vendor_boot
 build_zip
 
 popd > /dev/null
+
+duration=$SECONDS
 echo "-----------------------------------------------"
-echo "Build finished successfully!"
+echo "Build finished successfully in $(($duration / 60)) minutes and $(($duration % 60)) seconds"
+echo "-----------------------------------------------"
