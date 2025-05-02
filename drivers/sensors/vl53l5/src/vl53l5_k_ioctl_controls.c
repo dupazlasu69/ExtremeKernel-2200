@@ -2775,7 +2775,7 @@ out_state:
 int vl53l5_k_power_onoff(struct vl53l5_k_module_t *data, int io, bool on)
 {
 	int ret = 0;
-	int voltage = 0;
+	int voltage __attribute__((unused)) = 0;
 	int reg_enabled = 0;
 
 	vl53l5_k_log_info("%d : %s\n", io, on ? "on" : "off");

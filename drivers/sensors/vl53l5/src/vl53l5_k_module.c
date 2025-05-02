@@ -828,7 +828,7 @@ static ssize_t vl53l5_firmware_version_show(struct device *dev,
 {
 	struct vl53l5_k_module_t *p_module = dev_get_drvdata(dev);
 	struct vl53l5_version_t p_version;
-	int status = STATUS_OK;
+	int status __attribute__((unused)) = STATUS_OK;
 	enum vl53l5_k_state_preset prev_state;
 
 	p_version.firmware.ver_major = 0;
@@ -1449,7 +1449,7 @@ static ssize_t vl53l5_test_mode_store(struct device *dev,
 	struct vl53l5_k_module_t *p_module = dev_get_drvdata(dev);
 
 	u8 val;
-	int ret;
+	int ret __attribute__((unused));
 
 	ret = kstrtou8(buf, 10, &val);
 
@@ -2052,7 +2052,7 @@ int vl53l5_k_spi_probe(struct spi_device *spi)
 	p_module->dump_nb.priority = 1;
 
 	{
-		int ret;
+		int ret __attribute__((unused));
 		ret = sensordump_notifier_register(&p_module->dump_nb);
 		vl53l5_k_log_info("notifier %d", ret);
 	}
