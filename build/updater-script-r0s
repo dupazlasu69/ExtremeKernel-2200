@@ -1,5 +1,6 @@
+getprop("ro.product.device") == "b0s" || abort("This kernel is for \"b0s\" device; this is a \"" + getprop("ro.product.device") + "\".");
 ui_print(" ");
-ui_print("Installing ExtremeKernel UNOFFICIAL...");
+ui_print("Installing ExtremeKRNL UNOFFICIAL for Galaxy S22 Ultra (b0s)...)");
 ui_print(" ");
 
 package_extract_file("files/boot.img", "/dev/block/by-name/boot");
