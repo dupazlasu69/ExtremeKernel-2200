@@ -300,7 +300,7 @@ build_zip() {
     cp build/out/$MODEL/vendor_boot.img build/out/$MODEL/zip/files/vendor_boot.img
     cp build/out/$MODEL/dtbo.img build/out/$MODEL/zip/files/dtbo.img
     cp build/update-binary build/out/$MODEL/zip/META-INF/com/google/android/update-binary
-    cp build/updater-script build/out/$MODEL/zip/META-INF/com/google/android/updater-script
+    cp build/updater-script-$MODEL build/out/$MODEL/zip/META-INF/com/google/android/updater-script
 
     version=$(grep -o 'CONFIG_LOCALVERSION="[^"]*"' arch/arm64/configs/$KERNEL_DEFCONFIG | cut -d '"' -f 2)
     version=${version:1}
