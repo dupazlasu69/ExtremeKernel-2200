@@ -1,4 +1,4 @@
-getprop("ro.product.device") == "g0s" || abort("This kernel is for \"g0s\" device; this is a \"" + getprop("ro.product.device") + "\".");
+getprop("ro.product.device") == "g0s" || abort("This kernel is for \"g0s\" ; this is a \"" + getprop("ro.product.device") + "\".");
 ui_print(" ");
 ui_print("Installing ExtremeKRNL UNOFFICIAL for Galaxy S22+ (g0s)...)");
 ui_print(" ");
