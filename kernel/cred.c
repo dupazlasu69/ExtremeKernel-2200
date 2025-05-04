@@ -892,11 +892,3 @@ void validate_creds_for_do_exit(struct task_struct *tsk)
 }
 
 #endif /* CONFIG_DEBUG_CREDENTIALS */
-
-EXPORT_SYMBOL(get_cred_rcu);
-
-static void __maybe_unused __ksu_dummy_atomic_usage(void)
-{
-	atomic_t dummy = ATOMIC_INIT(1);
-	atomic_inc_not_zero(&dummy);
-}
