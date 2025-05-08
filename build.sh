@@ -305,12 +305,12 @@ build_zip() {
     version=$(grep -o 'CONFIG_LOCALVERSION="[^"]*"' arch/arm64/configs/$KERNEL_DEFCONFIG | cut -d '"' -f 2)
     version=${version:1}
     pushd build/out/$MODEL/zip > /dev/null
-    DATE=`date +"%d-%m-%Y_%H-%M-%S"`
+    DATE=`date "%d-%m-%Y_%H-%M-%S"`
 
     if [[ "$KSU_OPTION" == "y" ]]; then
-        NAME="$version"_"$MODEL"_UNOFFICIAL_KSU_"$DATE".zip
+        NAME=UPSTREAM_"$version"_"$MODEL"_UNOFFICIAL_KSU_"$DATE".zip
     else
-        NAME="$version"_"$MODEL"_UNOFFICIAL_"$DATE".zip
+        NAME=UPSTREAM_"$version"_"$MODEL"_UNOFFICIAL_"$DATE".zip
     fi
     zip -r -qq ../"$NAME" .
     popd > /dev/null
