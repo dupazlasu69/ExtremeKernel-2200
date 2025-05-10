@@ -91,8 +91,8 @@ nfsd_cache_hash(__be32 xid, struct nfsd_net *nn)
 }
 
 static struct svc_cacherep *
-nfsd_cacherep_alloc(struct svc_rqst *rqstp, __wsum csum,
-		    struct nfsd_net *nn)
+nfsd_reply_cache_alloc(struct svc_rqst *rqstp, __wsum csum,
+			struct nfsd_net *nn)
 {
 	struct svc_cacherep	*rp;
 
@@ -116,50 +116,21 @@ nfsd_cacherep_alloc(struct svc_rqst *rqstp, __wsum csum,
 	return rp;
 }
 
-static void nfsd_cacherep_free(struct svc_cacherep *rp)
+static void
+nfsd_reply_cache_free_locked(struct nfsd_drc_bucket *b, struct svc_cacherep *rp,
+				struct nfsd_net *nn)
 {
 	if (rp->c_type == RC_REPLBUFF && rp->c_replvec.iov_base) {
 		nn->drc_mem_usage -= rp->c_replvec.iov_len;
-	if (rp->c_type == RC_REPLBUFF)
 		kfree(rp->c_replvec.iov_base);
-	kmem_cache_free(drc_slab, rp);
-}
-
-static unsigned long
-nfsd_cacherep_dispose(struct list_head *dispose)
-{
-	struct svc_cacherep *rp;
-	unsigned long freed = 0;
-
-	while (!list_empty(dispose)) {
-		rp = list_first_entry(dispose, struct svc_cacherep, c_lru);
-		list_del(&rp->c_lru);
-		nfsd_cacherep_free(rp);
-		freed++;
 	}
-	return freed;
-}
-
-static void
-nfsd_cacherep_unlink_locked(struct nfsd_net *nn, struct nfsd_drc_bucket *b,
-			    struct svc_cacherep *rp)
-{
-	if (rp->c_type == RC_REPLBUFF && rp->c_replvec.iov_base)
-		nfsd_stats_drc_mem_usage_sub(nn, rp->c_replvec.iov_len);
 	if (rp->c_state != RC_UNUSED) {
 		rb_erase(&rp->c_node, &b->rb_head);
 		list_del(&rp->c_lru);
 		atomic_dec(&nn->num_drc_entries);
 		nn->drc_mem_usage -= sizeof(*rp);
 	}
-}
-
-static void
-nfsd_reply_cache_free_locked(struct nfsd_drc_bucket *b, struct svc_cacherep *rp,
-				struct nfsd_net *nn)
-{
-	nfsd_cacherep_unlink_locked(nn, b, rp);
-	nfsd_cacherep_free(rp);
+	kmem_cache_free(drc_slab, rp);
 }
 
 static void
@@ -167,9 +138,8 @@ nfsd_reply_cache_free(struct nfsd_drc_bucket *b, struct svc_cacherep *rp,
 			struct nfsd_net *nn)
 {
 	spin_lock(&b->cache_lock);
-	nfsd_cacherep_unlink_locked(nn, b, rp);
+	nfsd_reply_cache_free_locked(b, rp, nn);
 	spin_unlock(&b->cache_lock);
-	nfsd_cacherep_free(rp);
 }
 
 int nfsd_drc_slab_create(void)
@@ -201,7 +171,6 @@ int nfsd_reply_cache_init(struct nfsd_net *nn)
 	status = register_shrinker(&nn->nfsd_reply_cache_shrinker);
 	if (status)
 		goto out_nomem;
-		return status;
 
 	nn->drc_hashtbl = kvzalloc(array_size(hashsize,
 				sizeof(*nn->drc_hashtbl)), GFP_KERNEL);
@@ -255,29 +224,12 @@ lru_put_end(struct nfsd_drc_bucket *b, struct svc_cacherep *rp)
 	list_move_tail(&rp->c_lru, &b->lru_head);
 }
 
-static noinline struct nfsd_drc_bucket *
-nfsd_cache_bucket_find(__be32 xid, struct nfsd_net *nn)
+static long
+prune_bucket(struct nfsd_drc_bucket *b, struct nfsd_net *nn)
 {
-	unsigned int hash = hash_32((__force u32)xid, nn->maskbits);
-
-	return &nn->drc_hashtbl[hash];
-}
-
-/*
- * Remove and return no more than @max expired entries in bucket @b.
- * If @max is zero, do not limit the number of removed entries.
- */
-static void
-nfsd_prune_bucket_locked(struct nfsd_net *nn, struct nfsd_drc_bucket *b,
-			 unsigned int max, struct list_head *dispose)
-{
-	unsigned long expiry = jiffies - RC_EXPIRE;
 	struct svc_cacherep *rp, *tmp;
-	unsigned int freed = 0;
+	long freed = 0;
 
-	lockdep_assert_held(&b->cache_lock);
-
-	/* The bucket LRU is ordered oldest-first. */
 	list_for_each_entry_safe(rp, tmp, &b->lru_head, c_lru) {
 		/*
 		 * Don't free entries attached to calls that are still
@@ -285,29 +237,37 @@ nfsd_prune_bucket_locked(struct nfsd_net *nn, struct nfsd_drc_bucket *b,
 		 */
 		if (rp->c_state == RC_INPROG)
 			continue;
-
 		if (atomic_read(&nn->num_drc_entries) <= nn->max_drc_entries &&
-		    time_before(expiry, rp->c_timestamp))
+		    time_before(jiffies, rp->c_timestamp + RC_EXPIRE))
 			break;
-
-		nfsd_cacherep_unlink_locked(nn, b, rp);
-		list_add(&rp->c_lru, dispose);
-
-		if (max && ++freed > max)
-			break;
+		nfsd_reply_cache_free_locked(b, rp, nn);
+		freed++;
 	}
+	return freed;
 }
 
-/**
- * nfsd_reply_cache_count - count_objects method for the DRC shrinker
- * @shrink: our registered shrinker context
- * @sc: garbage collection parameters
- *
- * Returns the total number of entries in the duplicate reply cache. To
- * keep things simple and quick, this is not the number of expired entries
- * in the cache (ie, the number that would be removed by a call to
- * nfsd_reply_cache_scan).
+/*
+ * Walk the LRU list and prune off entries that are older than RC_EXPIRE.
+ * Also prune the oldest ones when the total exceeds the max number of entries.
  */
+static long
+prune_cache_entries(struct nfsd_net *nn)
+{
+	unsigned int i;
+	long freed = 0;
+
+	for (i = 0; i < nn->drc_hashsize; i++) {
+		struct nfsd_drc_bucket *b = &nn->drc_hashtbl[i];
+
+		if (list_empty(&b->lru_head))
+			continue;
+		spin_lock(&b->cache_lock);
+		freed += prune_bucket(b, nn);
+		spin_unlock(&b->cache_lock);
+	}
+	return freed;
+}
+
 static unsigned long
 nfsd_reply_cache_count(struct shrinker *shrink, struct shrink_control *sc)
 {
@@ -317,45 +277,14 @@ nfsd_reply_cache_count(struct shrinker *shrink, struct shrink_control *sc)
 	return atomic_read(&nn->num_drc_entries);
 }
 
-/**
- * nfsd_reply_cache_scan - scan_objects method for the DRC shrinker
- * @shrink: our registered shrinker context
- * @sc: garbage collection parameters
- *
- * Free expired entries on each bucket's LRU list until we've released
- * nr_to_scan freed objects. Nothing will be released if the cache
- * has not exceeded it's max_drc_entries limit.
- *
- * Returns the number of entries released by this call.
- */
 static unsigned long
 nfsd_reply_cache_scan(struct shrinker *shrink, struct shrink_control *sc)
 {
 	struct nfsd_net *nn = container_of(shrink,
 				struct nfsd_net, nfsd_reply_cache_shrinker);
-	unsigned long freed = 0;
-	LIST_HEAD(dispose);
-	unsigned int i;
 
-	for (i = 0; i < nn->drc_hashsize; i++) {
-		struct nfsd_drc_bucket *b = &nn->drc_hashtbl[i];
-
-		if (list_empty(&b->lru_head))
-			continue;
-
-		spin_lock(&b->cache_lock);
-		nfsd_prune_bucket_locked(nn, b, 0, &dispose);
-		spin_unlock(&b->cache_lock);
-
-		freed += nfsd_cacherep_dispose(&dispose);
-		if (freed > sc->nr_to_scan)
-			break;
-	}
-
-	trace_nfsd_drc_gc(nn, freed);
-	return freed;
+	return prune_cache_entries(nn);
 }
-
 /*
  * Walk an xdr_buf and get a CRC for at most the first RC_CSUMLEN bytes
  */
@@ -467,21 +396,18 @@ out:
  */
 int nfsd_cache_lookup(struct svc_rqst *rqstp)
 {
-	struct nfsd_net		*nn = net_generic(SVC_NET(rqstp), nfsd_net_id);
+	struct nfsd_net *nn = net_generic(SVC_NET(rqstp), nfsd_net_id);
 	struct svc_cacherep	*rp, *found;
 	__be32			xid = rqstp->rq_xid;
 	__wsum			csum;
 	u32 hash = nfsd_cache_hash(xid, nn);
 	struct nfsd_drc_bucket *b = &nn->drc_hashtbl[hash];
 	int type = rqstp->rq_cachetype;
-	unsigned long freed;
-	LIST_HEAD(dispose);
 	int rtn = RC_DOIT;
 
 	rqstp->rq_cacherep = NULL;
 	if (type == RC_NOCACHE) {
 		nfsdstats.rcnocache++;
-		nfsd_stats_rc_nocache_inc(nn);
 		goto out;
 	}
 
@@ -491,7 +417,7 @@ int nfsd_cache_lookup(struct svc_rqst *rqstp)
 	 * Since the common case is a cache miss followed by an insert,
 	 * preallocate an entry.
 	 */
-	rp = nfsd_cacherep_alloc(rqstp, csum, nn);
+	rp = nfsd_reply_cache_alloc(rqstp, csum, nn);
 	if (!rp)
 		goto out;
 
@@ -506,13 +432,7 @@ int nfsd_cache_lookup(struct svc_rqst *rqstp)
 	nfsdstats.rcmisses++;
 	rqstp->rq_cacherep = rp;
 	rp->c_state = RC_INPROG;
-	nfsd_prune_bucket_locked(nn, b, 3, &dispose);
-	spin_unlock(&b->cache_lock);
 
-	freed = nfsd_cacherep_dispose(&dispose);
-	trace_nfsd_drc_gc(nn, freed);
-
-	nfsd_stats_rc_misses_inc(nn);
 	atomic_inc(&nn->num_drc_entries);
 	nn->drc_mem_usage += sizeof(*rp);
 
@@ -527,13 +447,6 @@ out:
 found_entry:
 	/* We found a matching entry which is either in progress or done. */
 	nfsdstats.rchits++;
-	nfsd_stats_drc_mem_usage_add(nn, sizeof(*rp));
-	goto out;
-
-found_entry:
-	/* We found a matching entry which is either in progress or done. */
-	nfsd_reply_cache_free_locked(NULL, rp, nn);
-	nfsd_stats_rc_hits_inc(nn);
 	rtn = RC_DROPIT;
 
 	/* Request being processed */
@@ -565,10 +478,7 @@ found_entry:
 
 out_trace:
 	trace_nfsd_drc_found(nn, rqstp, rtn);
-out_unlock:
-	spin_unlock(&b->cache_lock);
-out:
-	return rtn;
+	goto out_unlock;
 }
 
 /**
@@ -680,16 +590,11 @@ static int nfsd_reply_cache_stats_show(struct seq_file *m, void *v)
 	seq_printf(m, "num entries:           %u\n",
 			atomic_read(&nn->num_drc_entries));
 	seq_printf(m, "hash buckets:          %u\n", 1 << nn->maskbits);
-	seq_printf(m, "mem usage:             %lld\n",
-		   percpu_counter_sum_positive(&nn->counter[NFSD_STATS_DRC_MEM_USAGE]));
-	seq_printf(m, "cache hits:            %lld\n",
-		   percpu_counter_sum_positive(&nn->counter[NFSD_STATS_RC_HITS]));
-	seq_printf(m, "cache misses:          %lld\n",
-		   percpu_counter_sum_positive(&nn->counter[NFSD_STATS_RC_MISSES]));
-	seq_printf(m, "not cached:            %lld\n",
-		   percpu_counter_sum_positive(&nn->counter[NFSD_STATS_RC_NOCACHE]));
-	seq_printf(m, "payload misses:        %lld\n",
-		   percpu_counter_sum_positive(&nn->counter[NFSD_STATS_PAYLOAD_MISSES]));
+	seq_printf(m, "mem usage:             %u\n", nn->drc_mem_usage);
+	seq_printf(m, "cache hits:            %u\n", nfsdstats.rchits);
+	seq_printf(m, "cache misses:          %u\n", nfsdstats.rcmisses);
+	seq_printf(m, "not cached:            %u\n", nfsdstats.rcnocache);
+	seq_printf(m, "payload misses:        %u\n", nn->payload_misses);
 	seq_printf(m, "longest chain len:     %u\n", nn->longest_chain);
 	seq_printf(m, "cachesize at longest:  %u\n", nn->longest_chain_cachesize);
 	return 0;
